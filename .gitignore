@@ -56,3 +56,19 @@ Makefile.gcc-orig
 # Win32-specific ignores end
 .DS_Store
 
+# Playground build runtime files (when using hints/linux-playground)
+dat/save/
+dat/perm
+dat/record
+dat/logfile
+dat/xlogfile
+dat/bones*
+dat/sysconf
+
+# Agent scripts runtime files
+agent_session.log
+agent_screen_dump.txt
+agent_keypress.txt
+agent_pidfile
+agent_stdin_fifo
+
