@@ -1,111 +1,86 @@
 #!/bin/sh
 #
-# Agent-friendly NetHack launcher. Wraps start.sh (which builds automatically)
-# and runs it through script(1) so output can be captured.
+# Start NetHack in a tmux session for agent interaction.
+# Blocks until the game is ready (copyright screen detected).
+#
+# The game runs inside tmux, which acts as a real terminal emulator --
+# all cursor movement, screen clears, and redraws are handled properly.
+# Use agent_look.sh to read the screen, agent_keypress.sh to send keys.
 #
 # Usage:
-#   ./agent_start.sh                      # Blocks until game is ready, then returns
-#   cat agent_screen_dump.txt             # Read current screen (updated ~1s)
-#   echo -n ' ' > agent_keypress.txt      # Send space key
-#   wait                                  # Wait for game to exit (optional)
-#
-# How it works: Backgrounds a daemon that runs the game. Parent polls
-# agent_screen_dump.txt for "NetHack, Copyright 1985" and returns when found
-# (game ready). Daemon: loop feeds keypresses to script's stdin; raw capture
-# processed into agent_screen_dump.txt ~1s. Single instance: flock on pidfile.
-#
-# Files: agent_screen_dump.txt (read), agent_keypress.txt (write), agent_pidfile
-# Env (optional): AGENT_SCREEN_DUMP, AGENT_KEYPRESS, AGENT_PIDFILE
+#   ./agent_start.sh          # blocks until game is ready
+#   ./agent_look.sh           # read current screen
+#   ./agent_keypress.sh y     # send a key
+#   ./agent_stop.sh           # stop the game
+
+if [ "$1" = "-h" ]; then
+    cat <<'EOF'
+Usage: ./agent_start.sh
+
+Start NetHack in a tmux session. Blocks until the game is ready.
+Use agent_look.sh to read the screen, agent_keypress.sh to send keys,
+and agent_stop.sh to quit.
+EOF
+    exit 0
+fi
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 SCREEN_DUMP="${AGENT_SCREEN_DUMP:-agent_screen_dump.txt}"
-KEYPRESS_FILE="${AGENT_KEYPRESS:-agent_keypress.txt}"
 PIDFILE="${AGENT_PIDFILE:-agent_pidfile}"
+TMUX_SESSION="nethack_agent"
 
-# Background ourselves; parent polls until game is ready
-if [ "$1" != "__agent_daemon__" ]; then
-    "$0" __agent_daemon__ "$@" &
-    daemon_pid=$!
-    while true; do
-        if grep -q "NetHack, Copyright 1985" "$SCREEN_DUMP" 2>/dev/null; then
-            exit 0
-        fi
-        if ! kill -0 $daemon_pid 2>/dev/null; then
-            exit 1
-        fi
-        sleep 0.5
-    done
-fi
-shift
-
-# Detect orphaned agent processes from a previous run (e.g. main was SIGKILL'd, subshell survived).
-# Only flag processes whose parent is init (PID 1) - those are true orphans. This avoids
-# false positives from the invoking shell (which has "agent_start" in its cmdline).
-others=$(pgrep -f "agent_start\.sh" 2>/dev/null | while read pid; do
-    [ "$pid" = "$$" ] && continue
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ "$ppid" = "1" ] && echo "$pid"
-done)
-if [ -n "$others" ]; then
-    echo "Other agent processes detected (orphaned from previous run): $others. Use ./agent_stop.sh to clean up, then try again." >&2
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "Error: tmux is required but not installed." >&2
     exit 1
 fi
 
-# Acquire exclusive lock on pidfile; refuse to start if another agent holds it.
-# Use append mode so we don't truncate the file (and wipe the PID) before checking.
-exec 9>>"$PIDFILE"
-if ! flock -n -x 9 2>/dev/null; then
-    echo "Agent already running (PID $(cat "$PIDFILE" 2>/dev/null)). Use ./agent_stop.sh first." >&2
+if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "Game already running. Use ./agent_stop.sh first." >&2
     exit 1
 fi
-# Stale pidfile: we got the lock (previous holder is dead) but a process from that
-# run may still be running (orphaned). Abort so the agent can decide what to do.
-old_pid=$(cat "$PIDFILE" 2>/dev/null)
-if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "Stale pidfile: process $old_pid still running (orphaned from previous run). Use ./agent_stop.sh to clean up, then try again." >&2
-    exit 1
+
+# Clean up stale background dumper from a previous run
+if [ -f "$PIDFILE" ]; then
+    old_pid=$(cat "$PIDFILE" 2>/dev/null)
+    [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null
+    rm -f "$PIDFILE"
 fi
-# We hold the lock; truncate and we'll write our PID after starting the script
-: > "$PIDFILE"
 
-echo 'starting agent script...' > "$SCREEN_DUMP"
+echo 'starting...' > "$SCREEN_DUMP"
 
-# Temp file for raw capture; script(1) requires a file to write to
-RAWCAPTURE="$(mktemp -t agent_nethack.XXXXXX)"
-# On exit, kill script and its children (nethack) so we don't leave orphans when e.g. terminal closes
-trap '[ -n "$SCRIPTPID" ] && pkill -TERM -P $SCRIPTPID 2>/dev/null; [ -n "$SCRIPTPID" ] && kill -TERM $SCRIPTPID 2>/dev/null; [ -n "$RAWCAPTURE" ] && rm -f "$RAWCAPTURE"; [ -n "$SCRIPTPID" ] && rm -f "$PIDFILE"' EXIT
+# Start the game in a detached tmux session (80x24 standard terminal)
+tmux new-session -d -s "$TMUX_SESSION" -x 80 -y 24 "TERM=xterm $ROOT/start.sh $*"
 
-# Process raw capture into readable screen: strip ANSI, fix CR->LF (curses uses
-# carriage returns between lines). Take from last clear [2J onward (current frame only).
-esc="$(printf '\033')"
-
-# Loop feeds keypresses to script's stdin; script forwards to game's PTY.
-# Loop also processes raw capture into screen_dump. Pipeline runs until game exits.
+# Background: dump screen to file every second so humans can follow along.
+# The agent reads directly from tmux via agent_look.sh; this is just for
+# human observers watching agent_screen_dump.txt.
 (
-    while true; do
-        if [ -f "$RAWCAPTURE" ]; then
-            last=$(grep -abo "${esc}\\[2J" "$RAWCAPTURE" 2>/dev/null | tail -1 | cut -d: -f1)
-            if [ -n "$last" ]; then
-                out=$(tail -c "+$((last + 4))" "$RAWCAPTURE" 2>/dev/null | \
-                sed "s/${esc}\\[[^a-zA-Z]*[a-zA-Z]//g;s/${esc}[=>]//g" | \
-                tr '\r' '\n' | tail -24)
-                [ -n "$out" ] && printf '%s' "$out" > "$SCREEN_DUMP"
-            fi
-        fi
-        [ -f "$KEYPRESS_FILE" ] && cat "$KEYPRESS_FILE" && rm -f "$KEYPRESS_FILE"
+    while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
+        tmux capture-pane -t "$TMUX_SESSION" -p > "$SCREEN_DUMP.tmp" 2>/dev/null \
+            && mv -f "$SCREEN_DUMP.tmp" "$SCREEN_DUMP"
         sleep 1
     done
-) | script -q -f -m classic -c "TERM=xterm ./start.sh $@" -O "$RAWCAPTURE" 2>/dev/null &
-SCRIPTPID=$!
-echo $SCRIPTPID >&9
+    echo '--- game exited ---' > "$SCREEN_DUMP"
+) &
+echo $! > "$PIDFILE"
 
-# Wait for game to exit
-wait $SCRIPTPID 2>/dev/null || true
-
-# Final dump
-echo "--- Game output ---"
-cat "$SCREEN_DUMP"
-echo "--- End of output ---"
-
+# Block until game is ready (detect copyright screen)
+attempts=0
+while true; do
+    if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "NetHack, Copyright 1985"; then
+        tmux capture-pane -t "$TMUX_SESSION" -p > "$SCREEN_DUMP" 2>/dev/null
+        exit 0
+    fi
+    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        echo "Game exited before becoming ready." >&2
+        exit 1
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 120 ]; then
+        echo "Timed out waiting for game to start (60s)." >&2
+        exit 1
+    fi
+    sleep 0.5
+done

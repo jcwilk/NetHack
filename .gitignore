@@ -68,7 +68,6 @@ dat/sysconf
 
 # Agent scripts runtime files
 agent_screen_dump.txt
-agent_keypress.txt
+agent_screen_dump.txt.tmp
 agent_pidfile
-agent_stdin_fifo
 
