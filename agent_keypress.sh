@@ -12,6 +12,7 @@ show_help() {
 Usage: ./agent_keypress.sh KEY [KEY ...]
 
 Send one or more keys to the NetHack game. Each argument is one keypress.
+After sending, prints the updated screen (via agent_look.sh).
 
 KEY formats:
   Single char:   a  A  @  /  ?  .  ,  <  >  :  ;
@@ -93,3 +94,6 @@ send_key() {
 for _k in "$@"; do
     send_key "$_k" || exit 1
 done
+
+sleep 0.1
+exec "$ROOT/agent_look.sh"
