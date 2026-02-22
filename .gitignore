@@ -66,7 +66,6 @@ dat/bones*
 dat/sysconf
 
 # Agent scripts runtime files
-agent_session.log
 agent_screen_dump.txt
 agent_keypress.txt
 agent_pidfile

@@ -1,7 +1,9 @@
 #!/bin/sh
 #
 # NetHack start script - run from build directory without installing.
-# Ensures prerequisites exist, builds if needed, then runs the game.
+#
+# Does automatically: mkdir dat/save, copy sysconf if missing, run setup.sh if
+# Makefile missing, make all (skips if up to date). No manual build step needed.
 # All arguments are passed through to the nethack executable.
 #
 # See RUN_LOCALLY.md for details on the playground configuration.
