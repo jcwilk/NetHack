@@ -63,6 +63,7 @@ dat/record
 dat/logfile
 dat/xlogfile
 dat/bones*
+dat/*lock*
 dat/sysconf
 
 # Agent scripts runtime files
